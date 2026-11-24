@@ -22,11 +22,25 @@ class FromDB(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
-# ----- users -----
-class UserCreate(BaseModel):
+# ----- auth -----
+class RegisterRequest(BaseModel):
     name: str = Field(min_length=2, max_length=100)
     email: str = Field(pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$", max_length=120)
+    password: str = Field(min_length=8, max_length=72)
     role: Role
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+# ----- users -----
 
 
 class UserUpdate(BaseModel):
@@ -46,7 +60,6 @@ class TopicCreate(BaseModel):
     title: str = Field(min_length=3, max_length=100)
     description: Optional[str] = Field(default=None, max_length=1000)
     grade: int = Field(ge=5, le=11)
-    teacher_id: int
 
 
 class TopicUpdate(BaseModel):
@@ -63,10 +76,6 @@ class TopicOut(FromDB):
     is_published: bool
     teacher_id: int
     problem_count: int
-
-
-class EnrollRequest(BaseModel):
-    student_id: int
 
 
 class EnrollmentOut(FromDB):
@@ -107,7 +116,6 @@ class ProblemOut(FromDB):
 
 # ----- attempts -----
 class AttemptCreate(BaseModel):
-    student_id: int
     answer: str = Field(min_length=1, max_length=100)
 
 

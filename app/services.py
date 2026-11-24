@@ -5,6 +5,7 @@ from fastapi import HTTPException
 from sqlalchemy import delete, desc, func, select
 from sqlalchemy.orm import Session
 
+from app.auth import create_access_token, hash_password, verify_password
 from app.models import Assignment, Attempt, Enrollment, Problem, Topic, User
 
 # share of points for the 1st, 2nd, 3rd try; later tries get 25%
@@ -45,14 +46,36 @@ def ensure_email_free(db: Session, email: str, exclude_id=None):
         raise HTTPException(status_code=409, detail="Email is already registered")
 
 
-def create_user(db: Session, data):
+def check_self(current_user, user_id: int):
+    if current_user.id != user_id:
+        raise HTTPException(status_code=403, detail="You can change only your own account")
+
+
+def check_self_or_teacher(current_user, user_id: int):
+    # students see only their own data; teachers can see any student
+    if current_user.role == "student" and current_user.id != user_id:
+        raise HTTPException(status_code=403, detail="Students can see only their own data")
+
+
+# ================= auth =================
+def register_user(db: Session, data):
     email = data.email.lower()
     ensure_email_free(db, email)
-    user = User(name=data.name, email=email, role=data.role.value)
+    user = User(name=data.name, email=email, role=data.role.value,
+                password_hash=hash_password(data.password))
     db.add(user)
     db.commit()
     db.refresh(user)
     return user
+
+
+def login(db: Session, data):
+    user = db.scalar(select(User).where(User.email == data.email.lower()))
+    # same message for "no such email" and "wrong password", so nobody can guess emails
+    if user is None or not verify_password(data.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid email or password",
+                            headers={"WWW-Authenticate": "Bearer"})
+    return {"access_token": create_access_token(user.id), "token_type": "bearer"}
 
 
 def list_users(db: Session, role):
@@ -62,8 +85,9 @@ def list_users(db: Session, role):
     return db.scalars(stmt).all()
 
 
-def update_user(db: Session, user_id: int, data):
+def update_user(db: Session, user_id: int, current_user, data):
     user = get_user(db, user_id)
+    check_self(current_user, user_id)
     changes = data.model_dump(exclude_unset=True)
     if not changes:
         raise HTTPException(status_code=400, detail="Nothing to update")
@@ -77,8 +101,9 @@ def update_user(db: Session, user_id: int, data):
     return user
 
 
-def delete_user(db: Session, user_id: int):
+def delete_user(db: Session, user_id: int, current_user):
     user = get_user(db, user_id)
+    check_self(current_user, user_id)
     if user.topics:
         raise HTTPException(status_code=409, detail=f"Teacher still has {len(user.topics)} topic(s). Delete them first")
     db.delete(user)  # a student's attempts and enrollments are deleted with them (cascade)
@@ -109,10 +134,10 @@ def ensure_title_free(db: Session, teacher_id: int, title: str, exclude_id=None)
         raise HTTPException(status_code=409, detail="You already have a topic with this title")
 
 
-def create_topic(db: Session, data):
-    check_role(db, data.teacher_id, "teacher")
-    ensure_title_free(db, data.teacher_id, data.title)
-    topic = Topic(**data.model_dump())
+def create_topic(db: Session, teacher_id: int, data):
+    check_role(db, teacher_id, "teacher")
+    ensure_title_free(db, teacher_id, data.title)
+    topic = Topic(teacher_id=teacher_id, **data.model_dump())
     db.add(topic)
     db.commit()
     db.refresh(topic)
@@ -253,15 +278,15 @@ def answers_match(given: str, correct: str) -> bool:
         return given.strip().lower() == correct.strip().lower()
 
 
-def submit_attempt(db: Session, problem_id: int, data):
+def submit_attempt(db: Session, problem_id: int, student_id: int, data):
     problem = get_problem(db, problem_id)
-    check_role(db, data.student_id, "student")
-    if not find_enrollment(db, data.student_id, problem.topic_id):
+    check_role(db, student_id, "student")
+    if not find_enrollment(db, student_id, problem.topic_id):
         raise HTTPException(status_code=403, detail="Enroll in the topic first")
-    check_level_unlocked(db, data.student_id, problem)
+    check_level_unlocked(db, student_id, problem)
 
     previous = db.scalars(select(Attempt).where(Attempt.problem_id == problem_id,
-                                                Attempt.student_id == data.student_id)).all()
+                                                Attempt.student_id == student_id)).all()
     if any(a.is_correct for a in previous):
         raise HTTPException(status_code=409, detail="You already solved this problem")
     if len(previous) >= problem.max_attempts:
@@ -273,7 +298,7 @@ def submit_attempt(db: Session, problem_id: int, data):
     share = POINTS_BY_TRY.get(number, 0.25) * (LATE_PENALTY if late else 1)
     points = round(problem.points * share) if is_correct else 0
 
-    attempt = Attempt(problem_id=problem_id, student_id=data.student_id, answer=data.answer,
+    attempt = Attempt(problem_id=problem_id, student_id=student_id, answer=data.answer,
                       is_correct=is_correct, attempt_number=number, points=points)
     db.add(attempt)
     db.commit()
@@ -288,7 +313,7 @@ def submit_attempt(db: Session, problem_id: int, data):
         message = "Wrong answer. No attempts left"
 
     return {
-        "id": attempt.id, "problem_id": problem_id, "student_id": data.student_id,
+        "id": attempt.id, "problem_id": problem_id, "student_id": student_id,
         "answer": attempt.answer, "is_correct": is_correct, "attempt_number": number,
         "points": points, "created_at": attempt.created_at,
         "late": late, "message": message, "attempts_left": left,
@@ -297,10 +322,16 @@ def submit_attempt(db: Session, problem_id: int, data):
     }
 
 
-def list_attempts(db: Session, student_id, problem_id, is_correct):
+def list_attempts(db: Session, current_user, student_id, problem_id, is_correct):
     stmt = select(Attempt).order_by(Attempt.id.desc())
-    if student_id is not None:
-        stmt = stmt.where(Attempt.student_id == student_id)
+    if current_user.role == "student":
+        # a student sees only their own attempts
+        stmt = stmt.where(Attempt.student_id == current_user.id)
+    else:
+        # a teacher sees attempts only in their own topics
+        stmt = stmt.join(Attempt.problem).join(Problem.topic).where(Topic.teacher_id == current_user.id)
+        if student_id is not None:
+            stmt = stmt.where(Attempt.student_id == student_id)
     if problem_id is not None:
         stmt = stmt.where(Attempt.problem_id == problem_id)
     if is_correct is not None:
@@ -320,8 +351,9 @@ def reset_attempts(db: Session, problem_id: int, teacher_id: int, student_id):
 
 
 # ================= progress and statistics =================
-def student_progress(db: Session, student_id: int):
+def student_progress(db: Session, student_id: int, current_user):
     student = get_user(db, student_id)
+    check_self_or_teacher(current_user, student_id)
     if student.role != "student":
         raise HTTPException(status_code=400, detail="This user is not a student")
 
@@ -515,8 +547,9 @@ def assignment_status(assignment, student_id: int, solved_ids: set[int]):
     return status, solved, total
 
 
-def student_assignments(db: Session, student_id: int):
+def student_assignments(db: Session, student_id: int, current_user):
     student = get_user(db, student_id)
+    check_self_or_teacher(current_user, student_id)
     if student.role != "student":
         raise HTTPException(status_code=400, detail="This user is not a student")
     solved_ids = solved_problem_ids(db, student_id)
