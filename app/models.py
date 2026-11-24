@@ -17,6 +17,7 @@ class User(Base):
     name: Mapped[str] = mapped_column(String(100))
     email: Mapped[str] = mapped_column(String(120), unique=True)
     role: Mapped[str] = mapped_column(String(20))
+    password_hash: Mapped[str] = mapped_column(String(255))  # never the plain password
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # one teacher -> many topics
