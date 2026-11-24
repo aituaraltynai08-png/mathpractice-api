@@ -1,8 +1,11 @@
 # Demo data. Run once after migrations:  python -m app.seed
 from datetime import datetime, timedelta, timezone
 
+from app.auth import hash_password
 from app.database import SessionLocal
 from app.models import Assignment, Attempt, Enrollment, Problem, Topic, User
+
+DEMO_PASSWORD = "password123"
 
 
 def seed():
@@ -12,10 +15,11 @@ def seed():
         db.close()
         return
 
-    teacher = User(name="Demo Teacher", email="teacher@mail.kz", role="teacher")
-    teacher2 = User(name="Second Teacher", email="teacher2@mail.kz", role="teacher")
-    s1 = User(name="Student One", email="student1@mail.kz", role="student")
-    s2 = User(name="Student Two", email="student2@mail.kz", role="student")
+    password = hash_password(DEMO_PASSWORD)  # every demo user has the same password
+    teacher = User(name="Demo Teacher", email="teacher@mail.kz", role="teacher", password_hash=password)
+    teacher2 = User(name="Second Teacher", email="teacher2@mail.kz", role="teacher", password_hash=password)
+    s1 = User(name="Student One", email="student1@mail.kz", role="student", password_hash=password)
+    s2 = User(name="Student Two", email="student2@mail.kz", role="student", password_hash=password)
     db.add_all([teacher, teacher2, s1, s2])
     db.flush()  # gives ids 1-4
 
@@ -64,7 +68,7 @@ def seed():
     ])
     db.commit()
     db.close()
-    print("Demo data added.")
+    print(f"Demo data added. All demo users have the password: {DEMO_PASSWORD}")
 
 
 if __name__ == "__main__":
